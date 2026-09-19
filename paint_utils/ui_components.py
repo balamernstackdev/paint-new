@@ -603,11 +603,19 @@ def sidebar_paint_fragment():
     st.subheader("🖌️ Paint Mode")
     active_color = st.session_state.get("picked_color", "#8FBC8F")
     
+    def update_sidebar_color():
+        st.session_state["picked_color"] = st.session_state["sidebar_paint_cp"]
+        
+    if "picked_color" not in st.session_state:
+        st.session_state["picked_color"] = "#8FBC8F"
+        
+    if st.session_state.get("sidebar_paint_cp") != st.session_state["picked_color"]:
+        st.session_state["sidebar_paint_cp"] = st.session_state["picked_color"]
+        
     with st.container(border=True):
         col_p, col_t = st.columns([0.3, 0.7])
-        active_color = st.session_state.get("picked_color", "#8FBC8F")
         with col_p:
-            new_color = st.color_picker("Color", active_color, label_visibility="collapsed", key="sidebar_paint_cp")
+            new_color = st.color_picker("Color", label_visibility="collapsed", key="sidebar_paint_cp", on_change=update_sidebar_color)
         with col_t:
              st.markdown(f"""
              <div style="display: flex; flex-direction: column; justify-content: center; height: 35px;">
@@ -615,10 +623,6 @@ def sidebar_paint_fragment():
                 <span style="color: #666; font-size: 11px; font-family: monospace;">{new_color}</span>
              </div>
              """, unsafe_allow_html=True)
-    
-    if new_color != active_color:
-        st.session_state["picked_color"] = new_color
-        # No rerun needed here as fragment handles local update
 
 
 def render_zoom_controls(key_suffix="", context_class=""):
@@ -1389,9 +1393,15 @@ def render_visualizer_canvas_fragment_v11(display_width, start_x, start_y, view_
                         if st.button("✨ APPLY", use_container_width=True, key="frag_apply", type="primary"):
                             cb_apply_pending(); safe_rerun() # Fragment scope default
                     with b_col2: 
-                        new_chosen = st.color_picker("Color", st.session_state.get("picked_color", "#8FBC8F"), label_visibility="collapsed", key="frag_pending_color")
-                        if new_chosen != st.session_state.get("picked_color"):
-                            st.session_state["picked_color"] = new_chosen
+                        def update_frag_color():
+                            st.session_state["picked_color"] = st.session_state["frag_pending_color"]
+                            
+                        if "picked_color" not in st.session_state:
+                            st.session_state["picked_color"] = "#8FBC8F"
+                        if st.session_state.get("frag_pending_color") != st.session_state["picked_color"]:
+                            st.session_state["frag_pending_color"] = st.session_state["picked_color"]
+                            
+                        new_chosen = st.color_picker("Color", label_visibility="collapsed", key="frag_pending_color", on_change=update_frag_color)
                     with b_col3: 
                         if st.button("🗑️ CANCEL", use_container_width=True, key="frag_cancel"):
                             cb_cancel_pending(); safe_rerun() # Fragment scope default

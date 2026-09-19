@@ -152,14 +152,23 @@ class ColorTransferEngine:
         
         L, A, B = cv2.split(img_lab)
         
-        # Target color in LAB (cached via get_target_ab)
-        target_a, target_b = ColorTransferEngine.get_target_ab(target_color_hex)
+        # Target color in LAB (cached via get_target_lab)
+        target_L, target_a, target_b = ColorTransferEngine.get_target_lab(target_color_hex)
         
-        # Preserve original Luminance, swap A/B channels
+        # Calculate mean lightness of the original wall to preserve texture
+        mask_bool = mask_soft > 0.1
+        if np.any(mask_bool):
+            mean_L = np.mean(L[mask_bool])
+        else:
+            mean_L = target_L
+            
+        new_L = np.clip(target_L + (L - mean_L), 0, 100)
+        
+        # Preserve original Luminance contrast, swap A/B channels
         new_A = np.full_like(A, target_a)
         new_B = np.full_like(B, target_b)
         
-        new_lab = cv2.merge([L, new_A, new_B])
+        new_lab = cv2.merge([new_L, new_A, new_B])
         recolored_rgb = cv2.cvtColor(new_lab, cv2.COLOR_Lab2RGB)
         
         # 4. Blend based on mask
@@ -171,12 +180,12 @@ class ColorTransferEngine:
 
     @staticmethod
     @st.cache_data
-    def get_target_ab(color_hex):
-        """Pre-calculate and cache the LAB A/B channels for a hex color."""
+    def get_target_lab(color_hex):
+        """Pre-calculate and cache the LAB channels for a hex color."""
         rgb = ColorTransferEngine.hex_to_rgb(color_hex)
         pixel = np.array([[[rgb[0], rgb[1], rgb[2]]]], dtype=np.uint8)
         lab = cv2.cvtColor(pixel.astype(np.float32)/255.0, cv2.COLOR_RGB2Lab)
-        return float(lab[0, 0, 1]), float(lab[0, 0, 2])
+        return float(lab[0, 0, 0]), float(lab[0, 0, 1]), float(lab[0, 0, 2])
 
     @staticmethod
     def composite_multiple_layers(image_rgb, masks_data):
@@ -216,45 +225,69 @@ class ColorTransferEngine:
         # Load Base
         base_L, base_A, base_B = st.session_state[l_cache_key]
         
-        # 2. Check for Incremental Update
-        # An update is incremental if:
-        # a. We have a valid cache
-        # b. The new mask list is longer than the cached one
-        # c. The prefix of the new list matches the logic (we assume append-only if len > cache)
-        # d. The last layer we cached has the same object identity
+        # --- PRE-COMPUTE GROUPED MEAN LIGHTNESS ---
+        # To prevent 'white bleaches' when multiple masks of the same color overlap or are small,
+        # we compute a single mean_L for the UNION of all masks sharing the same color.
+        color_masks = {}
+        for data in masks_data:
+            color = data.get('color')
+            mask = data.get('mask')
+            if color and mask is not None:
+                if sparse.issparse(mask): m = mask.toarray().astype(np.float32)
+                else: m = mask.astype(np.float32)
+                if m.shape[:2] != (h, w):
+                    m = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
+                if color not in color_masks:
+                    color_masks[color] = np.zeros((h, w), dtype=np.float32)
+                color_masks[color] = np.maximum(color_masks[color], m)
+                
+        current_means = {}
+        for color, combined_mask in color_masks.items():
+            m_bool = combined_mask > 0.1
+            if np.any(m_bool):
+                current_means[color] = np.mean(base_L[m_bool])
+            else:
+                current_means[color] = None
         
+        # 2. Check for Incremental Update
         cached_state = st.session_state.get("comp_cache_state")
         cached_len = st.session_state.get("comp_cache_len", 0)
+        cached_means = st.session_state.get("comp_cache_means", {})
         
         start_index = 0
         curr_A = base_A.copy()
         curr_B = base_B.copy()
-        # L must be mutable/copy for finishes that modify lightness
         curr_L_mod = base_L.copy() 
 
         can_use_cache = False
         
         if cached_state is not None and len(masks_data) > cached_len:
-            # Verify consistency: Did we just append?
-            # We check the identity of the last item in the *cache's* range
             if cached_len > 0:
                 last_cached_mask = masks_data[cached_len-1]
                 if id(last_cached_mask) == st.session_state.get("comp_cache_last_id"):
                      can_use_cache = True
             else:
-                can_use_cache = True # Cache was empty (0 layers), now we have >=1.
+                can_use_cache = True
+                
+        # Invalidate cache if grouped means changed significantly (e.g., > 1.0)
+        if can_use_cache:
+            for color, mean_val in current_means.items():
+                cached_mean = cached_means.get(color)
+                if mean_val is not None and cached_mean is not None:
+                    if abs(mean_val - cached_mean) > 1.0:
+                        can_use_cache = False
+                        break
+                elif mean_val != cached_mean:
+                    can_use_cache = False
+                    break
         
         if can_use_cache:
-            # Resume from cache!
-            # print(f"DEBUG: Smart Cache HIT! Rendering layers {cached_len} to {len(masks_data)}")
             c_L, c_A, c_B = cached_state
             curr_L_mod = c_L.copy()
             curr_A = c_A.copy()
             curr_B = c_B.copy()
             start_index = cached_len
         else:
-            # Full Re-render
-            # print("DEBUG: Smart Cache MISS. Rerendering all.")
             pass
 
         # 3. Cumulative A/B Blending
@@ -268,7 +301,7 @@ class ColorTransferEngine:
             if sparse.issparse(mask):
                 mask = mask.toarray()
             
-            target_a, target_b = ColorTransferEngine.get_target_ab(color_hex)
+            target_L, target_a, target_b = ColorTransferEngine.get_target_lab(color_hex)
             
             # Robust preparation
             if mask.shape[:2] != (h, w):
@@ -300,29 +333,59 @@ class ColorTransferEngine:
             else:
                 mask_dilated = mask_f
                 
-            mask_soft = cv2.GaussianBlur(mask_dilated, blur_val, 0)
+            if user_soft == 0:
+                # Auto-selected wall: fix the "white strip" edge halo problem.
+                # Expand the mask by 1 pixel so the paint fully covers the boundary,
+                # then apply a tight anti-aliasing blur to keep edges smooth but sharp.
+                mask_expanded = cv2.dilate(mask_dilated, np.ones((3,3), np.uint8), iterations=1)
+                mask_soft = cv2.GaussianBlur(mask_expanded, (3,3), 0)
+            else:
+                # Manual brush stroke: use the requested softness
+                mask_soft = cv2.GaussianBlur(mask_dilated, blur_val, 0)
+                
+            # --- DEBUG VISUALIZATION ---
+            import os
+            debug_dir = r"d:\paint\debug_masks"
+            if os.path.exists(debug_dir):
+                cv2.imwrite(os.path.join(debug_dir, f"01_original_mask_{i}.png"), (mask_f * 255).astype(np.uint8))
+                cv2.imwrite(os.path.join(debug_dir, f"02_expanded_mask_{i}.png"), (mask_expanded * 255).astype(np.uint8) if user_soft == 0 else (mask_dilated * 255).astype(np.uint8))
+                cv2.imwrite(os.path.join(debug_dir, f"03_feathered_mask_{i}.png"), (mask_soft * 255).astype(np.uint8))
+            # ---------------------------
+            
+            # Use the robust grouped mean_L for this color
+            mean_L = current_means.get(color_hex)
+            if mean_L is None:
+                mean_L = target_L
+                
+            # Shift lightness based on target color
+            adjusted_L = np.clip(target_L + (base_L - mean_L), 0, 100)
             
             # L-Channel Adjustment
             finish = data.get('finish', 'Standard')
+            layer_L = adjusted_L.copy()
             if finish != 'Standard':
-                layer_L = base_L.copy() # Always reference original L for finish calc
-                if finish == 'Matte': layer_L = np.clip(base_L * 0.85 + 7, 0, 100)
-                elif finish == 'Gloss': layer_L = np.clip((base_L - 50) * 1.35 + 50, 0, 100)
-                elif finish == 'Satin': layer_L = np.clip((base_L - 50) * 1.15 + 50, 0, 100)
+                if finish == 'Matte': layer_L = np.clip(adjusted_L * 0.85 + 7, 0, 100)
+                elif finish == 'Gloss': layer_L = np.clip((adjusted_L - 50) * 1.35 + 50, 0, 100)
+                elif finish == 'Satin': layer_L = np.clip((adjusted_L - 50) * 1.15 + 50, 0, 100)
                 elif finish == 'Texture': 
-                     t_rgb = self.hex_to_rgb(color_hex)
-                     t_lab = cv2.cvtColor(np.uint8([[t_rgb]]), cv2.COLOR_RGB2Lab)[0][0]
-                     target_L = t_lab[0]
-                     layer_L = np.clip((base_L * (target_L / 70.0)), 0, 100)
-                
-                curr_L_mod = (layer_L * mask_soft) + (curr_L_mod * (1.0 - mask_soft))
+                     layer_L = np.clip((adjusted_L * (target_L / 70.0)), 0, 100)
+            
+            curr_L_mod = (layer_L * mask_soft) + (curr_L_mod * (1.0 - mask_soft))
 
             curr_A = (target_a * mask_soft) + (curr_A * (1.0 - mask_soft))
             curr_B = (target_b * mask_soft) + (curr_B * (1.0 - mask_soft))
+            
+            # --- DEBUG VISUALIZATION ---
+            if os.path.exists(debug_dir):
+                temp_lab = cv2.merge([curr_L_mod, curr_A, curr_B])
+                temp_rgb = cv2.cvtColor(temp_lab, cv2.COLOR_Lab2RGB)
+                cv2.imwrite(os.path.join(debug_dir, f"04_composited_{i}.png"), cv2.cvtColor(np.clip(temp_rgb * 255.0, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
+            # ---------------------------
 
         # 4. Save Cache
         st.session_state["comp_cache_state"] = (curr_L_mod.copy(), curr_A.copy(), curr_B.copy())
         st.session_state["comp_cache_len"] = len(masks_data)
+        st.session_state["comp_cache_means"] = current_means
         if masks_data:
             st.session_state["comp_cache_last_id"] = id(masks_data[-1])
         else:
