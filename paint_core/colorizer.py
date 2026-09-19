@@ -320,35 +320,38 @@ class ColorTransferEngine:
                 if refinement > 0: mask_f = cv2.dilate(mask_f, refine_kernel)
                 else: mask_f = cv2.erode(mask_f, refine_kernel)
 
+            scale_ratio = max(1, int(w / 800))
+            
             user_soft = data.get('softness', 0)
-            if user_soft > 0:
-                k_size = user_soft * 4 + 1
-                blur_val = (k_size, k_size)
-            else:
-                blur_val = ColorizerConfig.BLUR_KERNEL_SIZE
             
             if ColorizerConfig.DILATION_ITERATIONS > 0:
-                kernel = np.ones(ColorizerConfig.DILATION_KERNEL_SIZE, np.uint8)
+                dk_size = ColorizerConfig.DILATION_KERNEL_SIZE[0] * scale_ratio
+                dk_size = dk_size if dk_size % 2 != 0 else dk_size + 1
+                kernel = np.ones((dk_size, dk_size), np.uint8)
                 mask_dilated = cv2.dilate(mask_f, kernel, iterations=ColorizerConfig.DILATION_ITERATIONS)
             else:
                 mask_dilated = mask_f
                 
             if user_soft == 0:
                 # Auto-selected wall: fix the "white strip" edge halo problem.
-                # Expand the mask by 1 pixel so the paint fully covers the boundary,
-                # then apply a tight anti-aliasing blur to keep edges smooth but sharp.
-                mask_expanded = cv2.dilate(mask_dilated, np.ones((3,3), np.uint8), iterations=1)
-                mask_soft = cv2.GaussianBlur(mask_expanded, (3,3), 0)
+                # Expand the mask proportionally to cover the boundary, but do NOT blur.
+                # Blurring causes semi-transparent pixels that mix with the bright sky (white halos) 
+                # or radiate out (green smog). A crisp edge is required here.
+                exp_k_size = 3 * scale_ratio
+                exp_k_size = exp_k_size if exp_k_size % 2 != 0 else exp_k_size + 1
+                mask_soft = cv2.dilate(mask_dilated, np.ones((exp_k_size, exp_k_size), np.uint8), iterations=1)
             else:
-                # Manual brush stroke: use the requested softness
-                mask_soft = cv2.GaussianBlur(mask_dilated, blur_val, 0)
+                # Manual brush stroke: use the requested softness, scaled by resolution
+                k_size = (user_soft * 4 + 1) * scale_ratio
+                k_size = k_size if k_size % 2 != 0 else k_size + 1
+                mask_soft = cv2.GaussianBlur(mask_dilated, (k_size, k_size), 0)
                 
             # --- DEBUG VISUALIZATION ---
             import os
             debug_dir = r"d:\paint\debug_masks"
             if os.path.exists(debug_dir):
                 cv2.imwrite(os.path.join(debug_dir, f"01_original_mask_{i}.png"), (mask_f * 255).astype(np.uint8))
-                cv2.imwrite(os.path.join(debug_dir, f"02_expanded_mask_{i}.png"), (mask_expanded * 255).astype(np.uint8) if user_soft == 0 else (mask_dilated * 255).astype(np.uint8))
+                cv2.imwrite(os.path.join(debug_dir, f"02_expanded_mask_{i}.png"), (mask_soft * 255).astype(np.uint8) if user_soft == 0 else (mask_dilated * 255).astype(np.uint8))
                 cv2.imwrite(os.path.join(debug_dir, f"03_feathered_mask_{i}.png"), (mask_soft * 255).astype(np.uint8))
             # ---------------------------
             

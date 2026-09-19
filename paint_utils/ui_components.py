@@ -1616,53 +1616,49 @@ def render_sidebar(sam, device_str):
                 _dl_label = "💎 PREPARE HIGH-RES DOWNLOAD" + (" (Grayscale)" if _gray_mode else "")
                 _dl_filename = "visualizer_grayscale_design.png" if _gray_mode else "pro_visualizer_design.png"
                 if st.button(_dl_label, use_container_width=True, type="primary"):
-                    st.toast("🎨 Professional Rendering in Progress...", icon="💎")
-                    try:
-                        original_img = st.session_state["image_original"]
-                        oh, ow = original_img.shape[:2]
-                        high_res_masks = []
-                        total = len(st.session_state["masks"])
-                        progress_bar = st.progress(0)
-                        for i, m_data in enumerate(st.session_state["masks"]):
-                            progress_bar.progress((i + 1) / total)
-                            # 1. Prepare Mask
-                            raw_mask = m_data['mask']
-                            from scipy import sparse
-                            if sparse.issparse(raw_mask):
-                                raw_mask = raw_mask.toarray()
+                    with st.spinner("🎨 Professional Rendering in Progress..."):
+                        try:
+                            original_img = st.session_state["image_original"]
+                            oh, ow = original_img.shape[:2]
+                            high_res_masks = []
+                            total = len(st.session_state["masks"])
+                            progress_bar = st.progress(0)
+                            for i, m_data in enumerate(st.session_state["masks"]):
+                                progress_bar.progress((i + 1) / total)
+                                # 1. Prepare Mask
+                                raw_mask = m_data['mask']
+                                from scipy import sparse
+                                if sparse.issparse(raw_mask):
+                                    raw_mask = raw_mask.toarray()
+                                
+                                # 2. Resize to full resolution
+                                mask_f32 = raw_mask.astype(np.float32)
+                                hr_mask_f32 = cv2.resize(mask_f32, (ow, oh), interpolation=cv2.INTER_LINEAR)
+                                
+                                # 3. Create high-res layer obj
+                                hr_m = m_data.copy()
+                                hr_m['mask'] = hr_mask_f32 > 0.4 
+                                high_res_masks.append(hr_m)
+                            progress_bar.empty()
+                            from paint_core.colorizer import ColorTransferEngine
                             
-                            # 2. Resize to full resolution with SMOOTHING
-                            mask_f32 = raw_mask.astype(np.float32)
-                            hr_mask_f32 = cv2.resize(mask_f32, (ow, oh), interpolation=cv2.INTER_LINEAR)
-                            
-                            # Apply smoothing to upscaled mask to prevent blockiness
-                            blur_k = max(1, int(ow / 800)) * 2 + 1
-                            hr_mask_smooth = cv2.GaussianBlur(hr_mask_f32, (blur_k, blur_k), 0)
-                            
-                            # 3. Create high-res layer obj
-                            hr_m = m_data.copy()
-                            hr_m['mask'] = hr_mask_smooth > 0.4 
-                            high_res_masks.append(hr_m)
-                        progress_bar.empty()
-                        from paint_core.colorizer import ColorTransferEngine
-                        
-                        if st.session_state.get("grayscale_mode", False):
-                            from paint_utils.image_processing import to_grayscale_rgb
-                            base_dl_img = to_grayscale_rgb(original_img)
-                        else:
-                            base_dl_img = original_img
+                            if st.session_state.get("grayscale_mode", False):
+                                from paint_utils.image_processing import to_grayscale_rgb
+                                base_dl_img = to_grayscale_rgb(original_img)
+                            else:
+                                base_dl_img = original_img
 
-                        from paint_utils.image_processing import composite_image
-                        dl_comp = composite_image(base_dl_img, high_res_masks)
-                        dl_pil = Image.fromarray(dl_comp)
-                        dl_buf = io.BytesIO()
-                        dl_pil.save(dl_buf, format="PNG")
-                        st.session_state["last_export"] = dl_buf.getvalue()
-                        st.success("✅ Download Ready!")
-                    except Exception as e:
-                        st.error(f"Export failed: {e}")
-                        import logging
-                        logging.error(f"High-res export failed: {e}", exc_info=True)
+                            from paint_utils.image_processing import composite_image
+                            dl_comp = composite_image(base_dl_img, high_res_masks)
+                            dl_pil = Image.fromarray(dl_comp)
+                            dl_buf = io.BytesIO()
+                            dl_pil.save(dl_buf, format="PNG")
+                            st.session_state["last_export"] = dl_buf.getvalue()
+                            st.success("✅ Download Ready!")
+                        except Exception as e:
+                            st.error(f"Export failed: {e}")
+                            import logging
+                            logging.error(f"High-res export failed: {e}", exc_info=True)
 
                 if st.session_state.get("last_export"):
                     _dl_fn = "visualizer_grayscale_design.png" if st.session_state.get("grayscale_mode") else "pro_visualizer_design.png"
