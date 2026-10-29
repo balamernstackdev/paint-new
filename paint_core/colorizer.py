@@ -333,26 +333,27 @@ class ColorTransferEngine:
                 mask_dilated = mask_f
                 
             if user_soft == 0:
-                # Auto-selected wall: fix the "white strip" edge halo problem.
-                # Expand the mask proportionally to cover the boundary, but do NOT blur.
-                # Blurring causes semi-transparent pixels that mix with the bright sky (white halos) 
-                # or radiate out (green smog). A crisp edge is required here.
                 exp_k_size = 3 * scale_ratio
                 exp_k_size = exp_k_size if exp_k_size % 2 != 0 else exp_k_size + 1
                 mask_soft = cv2.dilate(mask_dilated, np.ones((exp_k_size, exp_k_size), np.uint8), iterations=1)
             else:
-                # Manual brush stroke: use the requested softness, scaled by resolution
                 k_size = (user_soft * 4 + 1) * scale_ratio
                 k_size = k_size if k_size % 2 != 0 else k_size + 1
                 mask_soft = cv2.GaussianBlur(mask_dilated, (k_size, k_size), 0)
                 
-            # --- DEBUG VISUALIZATION ---
+            # HARD SAFETY RULE: Do not bleed outside original final_mask
+            mask_soft = mask_soft * mask_f
+                
+            # --- DEBUG VISUALIZATION (Optional) ---
             import os
-            debug_dir = r"d:\paint\debug_masks"
-            if os.path.exists(debug_dir):
-                cv2.imwrite(os.path.join(debug_dir, f"01_original_mask_{i}.png"), (mask_f * 255).astype(np.uint8))
-                cv2.imwrite(os.path.join(debug_dir, f"02_expanded_mask_{i}.png"), (mask_soft * 255).astype(np.uint8) if user_soft == 0 else (mask_dilated * 255).astype(np.uint8))
-                cv2.imwrite(os.path.join(debug_dir, f"03_feathered_mask_{i}.png"), (mask_soft * 255).astype(np.uint8))
+            debug_dir = os.environ.get("DEBUG_MASK_DIR")
+            if debug_dir and os.path.exists(debug_dir):
+                try:
+                    cv2.imwrite(os.path.join(debug_dir, f"01_original_mask_{i}.png"), (mask_f * 255).astype(np.uint8))
+                    cv2.imwrite(os.path.join(debug_dir, f"02_expanded_mask_{i}.png"), (mask_soft * 255).astype(np.uint8) if user_soft == 0 else (mask_dilated * 255).astype(np.uint8))
+                    cv2.imwrite(os.path.join(debug_dir, f"03_feathered_mask_{i}.png"), (mask_soft * 255).astype(np.uint8))
+                except Exception:
+                    pass
             # ---------------------------
             
             # Use the robust grouped mean_L for this color
@@ -373,16 +374,21 @@ class ColorTransferEngine:
                 elif finish == 'Texture': 
                      layer_L = np.clip((adjusted_L * (target_L / 70.0)), 0, 100)
             
-            curr_L_mod = (layer_L * mask_soft) + (curr_L_mod * (1.0 - mask_soft))
-
-            curr_A = (target_a * mask_soft) + (curr_A * (1.0 - mask_soft))
-            curr_B = (target_b * mask_soft) + (curr_B * (1.0 - mask_soft))
+            # Replace where mask is active, blending with the BASE image (not previous layers)
+            mask_active = mask_soft > 0
             
-            # --- DEBUG VISUALIZATION ---
-            if os.path.exists(debug_dir):
-                temp_lab = cv2.merge([curr_L_mod, curr_A, curr_B])
-                temp_rgb = cv2.cvtColor(temp_lab, cv2.COLOR_Lab2RGB)
-                cv2.imwrite(os.path.join(debug_dir, f"04_composited_{i}.png"), cv2.cvtColor(np.clip(temp_rgb * 255.0, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
+            curr_L_mod = np.where(mask_active, (layer_L * mask_soft) + (base_L * (1.0 - mask_soft)), curr_L_mod)
+            curr_A = np.where(mask_active, (target_a * mask_soft) + (base_A * (1.0 - mask_soft)), curr_A)
+            curr_B = np.where(mask_active, (target_b * mask_soft) + (base_B * (1.0 - mask_soft)), curr_B)
+            
+            # --- DEBUG VISUALIZATION (Optional) ---
+            if debug_dir and os.path.exists(debug_dir):
+                try:
+                    temp_lab = cv2.merge([curr_L_mod, curr_A, curr_B])
+                    temp_rgb = cv2.cvtColor(temp_lab, cv2.COLOR_Lab2RGB)
+                    cv2.imwrite(os.path.join(debug_dir, f"04_composited_{i}.png"), cv2.cvtColor(np.clip(temp_rgb * 255.0, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
+                except Exception:
+                    pass
             # ---------------------------
 
         # 4. Save Cache

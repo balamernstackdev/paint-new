@@ -1661,8 +1661,39 @@ def render_sidebar(sam, device_str):
                             logging.error(f"High-res export failed: {e}", exc_info=True)
 
                 if st.session_state.get("last_export"):
+                    import base64
                     _dl_fn = "visualizer_grayscale_design.png" if st.session_state.get("grayscale_mode") else "pro_visualizer_design.png"
-                    st.download_button(label="📥 Save Final Image", data=st.session_state["last_export"], file_name=_dl_fn, mime="image/png", use_container_width=True)
+                    _b64_data = base64.b64encode(st.session_state["last_export"]).decode("utf-8")
+                    _dl_html = f"""
+                    <div style="margin: 8px 0 14px 0;">
+                        <a href="data:image/png;base64,{_b64_data}" download="{_dl_fn}" style="
+                            display: flex;
+                            align-items: center;
+                            justify-content: center;
+                            gap: 8px;
+                            width: 100%;
+                            min-height: 42px;
+                            padding: 0.5rem 1rem;
+                            box-sizing: border-box;
+                            font-family: inherit;
+                            font-size: 14px;
+                            font-weight: 600;
+                            color: #1e40af !important;
+                            background-color: #eff6ff;
+                            border: 1.5px solid #3b82f6;
+                            border-radius: 8px;
+                            text-align: center;
+                            text-decoration: none !important;
+                            cursor: pointer;
+                            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+                            transition: all 0.2s ease-in-out;
+                        " onmouseover="this.style.backgroundColor='#dbeafe';this.style.borderColor='#1d4ed8';this.style.transform='translateY(-1px)';" onmouseout="this.style.backgroundColor='#eff6ff';this.style.borderColor='#3b82f6';this.style.transform='translateY(0)';">
+                            <span style="font-size: 16px;">📥</span>
+                            <span style="font-size: 14px; font-weight: 600;">Save Final Image</span>
+                        </a>
+                    </div>
+                    """
+                    st.markdown(_dl_html, unsafe_allow_html=True)
             
             
             st.markdown('<div class="sidebar-header-text">🛠️ Selection Tool</div>', unsafe_allow_html=True)

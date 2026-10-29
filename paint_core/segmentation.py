@@ -519,6 +519,90 @@ class SegmentationEngine:
                                     max_label = i
                             best_mask = (labels_im == max_label)
         
+        # --- NEW CODE: EXPLICIT WINDOW PROTECTION AND DEBUGGING ---
+        import os
+        if cleanup:
+            raw_sam_mask = (best_mask * 255).astype(np.uint8)
+            h_m, w_m = raw_sam_mask.shape
+            
+            window_mask = np.zeros_like(raw_sam_mask)
+            door_mask = np.zeros_like(raw_sam_mask)
+            glass_mask = np.zeros_like(raw_sam_mask)
+            frame_mask = np.zeros_like(raw_sam_mask)
+            
+            if 'ref_x' in locals() and ref_x is not None and 'ref_y' in locals() and ref_y is not None:
+                try:
+                    # Use the seed color calculated earlier
+                    y1, y2 = max(0, ref_y-1), min(h_m, ref_y+2)
+                    x1, x2 = max(0, ref_x-1), min(w_m, ref_x+2)
+                    seed_patch_val = self.image_rgb[y1:y2, x1:x2]
+                    seed_color_val = np.median(seed_patch_val, axis=(0, 1))
+                    
+                    img_u16_val = self.image_u16
+                    diff_r_val = np.abs(img_u16_val[:,:,0] - seed_color_val[0])
+                    diff_g_val = np.abs(img_u16_val[:,:,1] - seed_color_val[1])
+                    diff_b_val = np.abs(img_u16_val[:,:,2] - seed_color_val[2])
+                    color_diff_val = np.maximum(np.maximum(diff_r_val, diff_g_val), diff_b_val)
+                    
+                    # Very different colors (glass, sky, wood frames)
+                    tol_val = 95
+                    if is_wall_click: tol_val = 120
+                    
+                    # Regions that are definitely not the wall color
+                    not_wall_color = (color_diff_val > tol_val * 1.5).astype(np.uint8) * 255
+                    
+                    # Find holes that were filled in the mask
+                    potential_holes = not_wall_color & raw_sam_mask
+                    
+                    # Clean up
+                    kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+                    potential_holes = cv2.morphologyEx(potential_holes, cv2.MORPH_OPEN, kernel_open)
+                    
+                    cnts_holes, _ = cv2.findContours(potential_holes, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    for c_hole in cnts_holes:
+                        area_hole = cv2.contourArea(c_hole)
+                        if area_hole > (h_m * w_m * 0.001): # At least 0.1% of image
+                            hx, hy, hcw, hch = cv2.boundingRect(c_hole)
+                            
+                            # Glass mask
+                            cv2.drawContours(glass_mask, [c_hole], -1, 255, thickness=-1)
+                            
+                            # Frame Mask: strong edges inside and around the window
+                            expand = 15
+                            ex_x = max(0, hx - expand)
+                            ex_y = max(0, hy - expand)
+                            ex_w = min(w_m - ex_x, hcw + expand*2)
+                            ex_h = min(h_m - ex_y, hch + expand*2)
+                            
+                            roi_edges = self.image_edges_map[ex_y:ex_y+ex_h, ex_x:ex_x+ex_w]
+                            _, strong_edges = cv2.threshold(roi_edges, 50, 255, cv2.THRESH_BINARY)
+                            strong_edges = cv2.dilate(strong_edges, np.ones((5,5), np.uint8))
+                            frame_mask[ex_y:ex_y+ex_h, ex_x:ex_x+ex_w] = cv2.bitwise_or(
+                                frame_mask[ex_y:ex_y+ex_h, ex_x:ex_x+ex_w], strong_edges
+                            )
+                except Exception as e:
+                    print(f"Error in window protection: {e}")
+                    
+            protected_object_mask = window_mask | door_mask | glass_mask | frame_mask
+            final_paint_mask = raw_sam_mask & (~protected_object_mask)
+            
+            # Safe debug output (only if explicitly enabled via environment)
+            try:
+                debug_dir = os.environ.get("DEBUG_MASK_DIR")
+                if debug_dir:
+                    os.makedirs(debug_dir, exist_ok=True)
+                    cv2.imwrite(os.path.join(debug_dir, "01_RAW_SAM_MASK.png"), raw_sam_mask)
+                    cv2.imwrite(os.path.join(debug_dir, "02_REFINED_WALL_MASK.png"), raw_sam_mask)
+                    cv2.imwrite(os.path.join(debug_dir, "03_WINDOW_MASK.png"), window_mask)
+                    cv2.imwrite(os.path.join(debug_dir, "04_DOOR_MASK.png"), door_mask)
+                    cv2.imwrite(os.path.join(debug_dir, "05_GLASS_MASK.png"), glass_mask)
+                    cv2.imwrite(os.path.join(debug_dir, "06_PROTECTED_OBJECT_MASK.png"), protected_object_mask)
+                    cv2.imwrite(os.path.join(debug_dir, "07_FINAL_PAINT_MASK.png"), final_paint_mask)
+            except Exception:
+                pass
+            
+            best_mask = final_paint_mask > 0
+
         return best_mask
 
     def _filter_small_components(self, mask, click_x, click_y, target_label, labels_im, stats, centroids):
